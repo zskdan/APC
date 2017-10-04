@@ -21,7 +21,17 @@ Requirements
 Installation
 ------------
 
-No source installation required.  Just download and run.
+```bash
+$ pip install git+https://github.com/quackenbush/APC
+```
+
+or
+
+Download source and run
+
+```bash
+$ python setup.py install
+```
 
 The APC needs to be set up with telnet enabled, and using a fixed IP address.
 If a DHCP address is used, it may change, and you will have trouble connecting.
@@ -30,16 +40,16 @@ Usage
 -----
 
 ### Power cycle (reboot) a single port
-```$ ./apc.py --reboot PORT```
+```$ apc --reboot PORT```
 
 ### Example: reboot power port 1
-```$ ./apc.py --reboot 1```
+```$ apc --reboot 1```
 
 ### Display help
 ```
-$ ./apc.py --help
+$ apc --help
 
-usage: apc.py [-h] [--host HOST] [-v] [--quiet] [--user USER]
+usage: apc [-h] [--host HOST] [-v] [--quiet] [--user USER]
               [--password PASSWORD] [--debug] [--reboot REBOOT] [--off OFF]
               [--on ON]
 
@@ -70,7 +80,7 @@ Example session
 ---------------
 
 ```
-$ ./apc.py --reboot 8
+$ apc --reboot 8
 Acquiring lock /tmp/apc.lock
 Connecting to APC @ 10.8.0.142
 Logged in as user apc, version 3.7.3
