@@ -16,10 +16,6 @@ from apc.lockfile import FilesystemLock
 
 APC_ESCAPE = '\033'
 
-APC_IMMEDIATE_REBOOT = ['4', '3']
-APC_IMMEDIATE_ON     = ['1', '1']
-APC_IMMEDIATE_OFF    = ['3', '2']
-
 APC_YES    = 'YES'
 APC_LOGOUT = '4'
 
@@ -33,26 +29,54 @@ LOCK_PATH = '/tmp/apc.lock'
 LOCK_TIMEOUT = 60
 
 
-class APC:
-    def __init__(self, options):
-        self.host = options.host
-        self.user = options.user
-        self.password = options.password
-        self.verbose = options.verbose
-        self.quiet = options.quiet
-        self.connect()
+class APCFactory:
+    def build(self, host, user, password, verbose, quiet, cli=''):
+        self.quiet = quiet
 
-    def info(self, msg):
-        if not self.quiet:
-            print(msg)
+        self._lock()
 
-    def notify(self, outlet_name, state):
-        print('APC %s: %s %s' % (self.host, outlet_name, state))
+        self.info('Connecting to APC @ %s' % host)
+        if cli == '':
+            commandline = 'telnet %s' % host
+        else:
+            commandline = cli.format(host=host, user=user, password=password)
+        if verbose:
+            print("Running '%s'" % commandline)
+        child = pexpect.spawn(commandline)
 
-    def sendnl(self, a):
-        self.child.send(a + '\r\n')
-        if self.verbose:
-            print(self.child.before)
+        child.timeout = 10
+        child.setecho(True)
+
+        child.expect('User Name : ')
+        child.send(user + '\r\n')
+        child.before
+        child.expect('Password  : ')
+        child.send(password + '\r\n')
+
+        child.expect('Communication Established')
+
+        header = child.before
+
+        match = APC_VERSION_PATTERN.search(str(header))
+
+        if not match:
+            raise Exception('Could not parse APC version')
+
+        version = match.group(1)
+
+        self.info('Logged in as user %s, version %s'
+                  % (user, version))
+
+        if version[0] == '3':
+            apc = APC3(host, verbose, quiet)
+        else:
+            apc = APC2(host, verbose, quiet)
+
+        apc.child = child
+        apc.version = version
+        apc.apc_lock = self.apc_lock
+
+        return apc
 
     def _lock(self):
         self.info('Acquiring lock %s' % (LOCK_PATH))
@@ -66,38 +90,23 @@ class APC:
             if count >= LOCK_TIMEOUT:
                 raise SystemError('Cannot acquire %s\n' % (LOCK_PATH))
 
-    def _unlock(self):
-        self.apc_lock.unlock()
+    def info(self, msg):
+        if not self.quiet:
+            print(msg)
 
-    def connect(self):
-        self._lock()
+class AbstractAPC:
+    def __init__(self, host, verbose, quiet):
+        self.host = host
+        self.verbose = verbose
+        self.quiet = quiet
 
-        self.info('Connecting to APC @ %s' % self.host)
-        self.child = pexpect.spawn('telnet %s' % self.host)
+    def notify(self, outlet_name, state):
+        print('APC %s: %s %s' % (self.host, outlet_name, state))
 
-        self.child.timeout = 10
-        self.child.setecho(True)
-
-        self.child.expect('User Name : ')
-        self.child.send(self.user + '\r\n')
-        self.child.before
-        self.child.expect('Password  : ')
-        self.child.send(self.password + '\r\n')
-
-        self.child.expect('Communication Established')
-
-        header = self.child.before
-
-        match = APC_VERSION_PATTERN.search(str(header))
-
-        if not match:
-            raise Exception('Could not parse APC version')
-
-        self.version = match.group(1)
-        self.is_new_version = (self.version[0] == '3')
-
-        self.info('Logged in as user %s, version %s'
-                  % (self.user, self.version))
+    def sendnl(self, a):
+        self.child.send(a + '\r\n')
+        if self.verbose:
+            print(self.child.before)
 
     def get_outlet(self, outlet):
         if str(outlet) in ['*', '+', '9']:
@@ -111,40 +120,16 @@ class APC:
             except:
                 raise SystemExit('Bad outlet: [%s]' % outlet)
 
-    def configure_outlet(self, outlet):
-        if self.is_new_version:
-            self.sendnl('1')
-            self.sendnl('2')
-            self.sendnl('1')
-            self.sendnl(str(outlet))
-
-            self.sendnl('1')
-
-        else:
-            self.sendnl('1')
-            self.sendnl('1')
-            self.sendnl(str(outlet))
-
-            self.sendnl('1')
-
-        self.child.before
-
-    def get_command_result(self):
-        if self.is_new_version:
-            self.child.expect('Command successfully issued')
-        else:
-            self.child.expect('Outlet State')
-
     def _escape_to_main(self):
         for i in range(6):
             self.child.send(APC_ESCAPE)
 
-    def reboot(self, outlet):
+    def reboot_immediate(self, outlet):
         (outlet, outlet_name) = self.get_outlet(outlet)
 
-        self.configure_outlet(outlet)
+        self.control_outlet(outlet)
 
-        self.sendnl(APC_IMMEDIATE_REBOOT[self.is_new_version])
+        self.sendnl(self.APC_IMMEDIATE_REBOOT)
 
         self.child.expect('Immediate Reboot')
         self.sendnl(APC_YES)
@@ -156,16 +141,25 @@ class APC:
 
         self._escape_to_main()
 
-    def on_off(self, outlet, on):
+    def reboot_delayed(self, outlet, delay):
+        raise NotImplementedError()
+
+    def reboot(self, outlet, delay):
+        if delay == 0:
+            self.reboot_immediate(outlet)
+        else:
+            self.reboot_delayed(outlet, delay)
+
+    def on_off_immediate(self, outlet, on):
         (outlet, outlet_name) = self.get_outlet(outlet)
 
-        self.configure_outlet(outlet)
+        self.control_outlet(outlet)
 
         if on:
-            cmd = APC_IMMEDIATE_ON[self.is_new_version]
+            cmd = self.APC_IMMEDIATE_ON
             str_cmd = 'On'
         else:
-            cmd = APC_IMMEDIATE_OFF[self.is_new_version]
+            cmd = self.APC_IMMEDIATE_OFF
             str_cmd = 'Off'
 
         self.sendnl(cmd)
@@ -178,14 +172,26 @@ class APC:
 
         self._escape_to_main()
 
-    def on(self, outlet):
-        self.on_off(outlet, True)
+    def on_off_delayed(self, outlet, on, delay):
+        raise NotImplementedError()
 
-    def off(self, outlet):
-        self.on_off(outlet, False)
+    def on(self, outlet, delay):
+        if delay == 0:
+            self.on_off_immediate(outlet, True)
+        else:
+            self.on_off_delayed(outlet, True, delay)
+
+    def off(self, outlet, delay):
+        if delay == 0:
+            self.on_off_immediate(outlet, False)
+        else:
+            self.on_off_delayed(outlet, False, delay)
 
     def debug(self):
         self.child.interact()
+
+    def _unlock(self):
+        self.apc_lock.unlock()
 
     def disconnect(self):
         # self._escape_to_main()
@@ -200,3 +206,95 @@ class APC:
 
         self.child.close()
         self._unlock()
+
+    def control_outlet(self, outlet):
+        raise NotImplementedError()
+
+    def get_command_result(self):
+        raise NotImplementedError()
+
+
+class APC2(AbstractAPC):
+    APC_IMMEDIATE_ON     = '1'
+    APC_IMMEDIATE_OFF    = '3'
+    APC_IMMEDIATE_REBOOT = '4'
+
+    def control_outlet(self, outlet):
+        self.sendnl('1')
+        self.sendnl('1')
+        self.sendnl(str(outlet))
+        self.sendnl('1')
+        self.child.before
+
+    def get_command_result(self):
+        self.child.expect('Outlet State')
+
+
+class APC3(AbstractAPC):
+    APC_IMMEDIATE_ON     = '1'
+    APC_IMMEDIATE_OFF    = '2'
+    APC_IMMEDIATE_REBOOT = '3'
+    APC_DELAYED_ON       = '4'
+    APC_DELAYED_OFF      = '5'
+    APC_DELAYED_REBOOT   = '6'
+
+    def control_outlet(self, outlet):
+        self.sendnl('1')
+        self.sendnl('2')
+        self.sendnl('1')
+        self.sendnl(str(outlet))
+        self.sendnl('1')
+        self.child.before
+
+    def configure_outlet(self, outlet):
+        self.sendnl('1')
+        self.sendnl('2')
+        self.sendnl('1')
+        self.sendnl(str(outlet))
+        self.sendnl('2')
+        self.child.before
+
+    def get_command_result(self):
+        self.child.expect('Command successfully issued')
+
+    def on_off_delayed(self, outlet, on, delay):
+        (outlet, outlet_name) = self.get_outlet(outlet)
+
+        self.configure_outlet(outlet)
+        self.child.expect("Configure Outlet")
+
+        if on:
+            self.sendnl('2')  # Power On Delay(sec)
+        else:
+            self.sendnl('3')  # Power Off Delay(sec)
+        if delay == -1 or delay >= 0 and delay <= 7200:
+            self.sendnl(str(delay))
+        else:
+            raise NotImplementedError("Delay Range: -1 to 7200 sec, where -1=Never")
+        self.sendnl('5')  # Accept Changes
+        self.child.before
+
+        self._escape_to_main()
+
+        self.control_outlet(outlet)
+        self.child.expect("Control Outlet")
+
+        if on:
+            cmd = self.APC_DELAYED_ON
+            str_cmd = 'On'
+        else:
+            cmd = self.APC_DELAYED_OFF
+            str_cmd = 'Off'
+
+        self.sendnl(cmd)
+        self.sendnl(APC_YES)
+        self.sendnl('')
+
+        self.get_command_result()
+
+        self.notify(outlet_name, str_cmd)
+
+        self._escape_to_main()
+
+    def reboot_delayed(self, outlet, delay):
+        raise NotImplementedError("ToDo: delay!=duration")

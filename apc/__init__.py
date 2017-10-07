@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from apc.utility import APC  # noqa
+from apc.utility import APCFactory  # noqa
 from apc.utility import APC_DEFAULT_HOST  # noqa
 from apc.utility import APC_DEFAULT_USER  # noqa
 from apc.utility import APC_DEFAULT_PASSWORD  # noqa

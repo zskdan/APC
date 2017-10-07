@@ -2,7 +2,7 @@
 
 from argparse import ArgumentParser
 import pexpect
-from apc import APC
+from apc import APCFactory
 from apc import APC_DEFAULT_HOST, APC_DEFAULT_USER, APC_DEFAULT_PASSWORD
 
 
@@ -27,6 +27,12 @@ def main():
                         help='Turn off an outlet')
     parser.add_argument('--on', action='store',
                         help='Turn on an outlet')
+    parser.add_argument('--cli', action='store', default='',
+                        help="command line to execute 'ssh {user}@{host}' or 'telnet {host}")
+    parser.add_argument('--delay', action='store', default=0,
+                        help='delay before on/off')
+    # parser.add_argument('--duration', action='store', default=0,
+    #                    help='reboot duration')
 
     args = parser.parse_args()
 
@@ -37,20 +43,24 @@ def main():
         raise SystemExit(1)
 
     try:
-        apc = APC(args)
+        factory = APCFactory()
+        apc = factory.build(args.host, args.user, args.password, args.verbose, args.quiet, args.cli)
     except pexpect.TIMEOUT as e:
         raise SystemExit('ERROR: Timeout connecting to APC')
+
+    args.delay = int(args.delay)
+    # args.duration = int(args.duration)
 
     if args.debug:
         apc.debug()
     else:
         try:
             if args.reboot:
-                apc.reboot(args.reboot)
+                apc.reboot(args.reboot, args.delay)
             elif args.on:
-                apc.on(args.on)
+                apc.on(args.on, args.delay)
             elif args.off:
-                apc.off(args.off)
+                apc.off(args.off, args.delay)
         except pexpect.TIMEOUT as e:
             raise SystemExit('APC failed!  Pexpect result:\n%s' % e)
         finally:
