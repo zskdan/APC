@@ -12,6 +12,7 @@ import re
 import time
 import pexpect
 from apc.lockfile import FilesystemLock
+from apc.outlet import Outlet, Outlets
 
 
 APC_ESCAPE = '\033'
@@ -29,11 +30,42 @@ LOCK_PATH = '/tmp/apc.lock'
 LOCK_TIMEOUT = 60
 
 
-class APCFactory:
-    def build(self, host, user, password, verbose, quiet, cli=''):
+def APC(host, user, password, verbose=False, quiet=False, cli=''):
+    factory = APCFactory()
+    apc = factory.build(host, user, password, verbose, quiet, cli)
+    return apc
+
+
+class APCLock:
+    def __init__(self, quiet):
         self.quiet = quiet
 
-        self._lock()
+    def lock(self):
+        self.info('Acquiring lock %s' % (LOCK_PATH))
+
+        self.lock = FilesystemLock(LOCK_PATH)
+
+        count = 0
+        while not self.lock.lock():
+            time.sleep(1)
+            count += 1
+            if count >= LOCK_TIMEOUT:
+                raise SystemError('Cannot acquire %s\n' % (LOCK_PATH))
+
+    def unlock(self):
+        self.lock.unlock()
+
+    def info(self, msg):
+        if not self.quiet:
+            print(msg)
+
+
+class APCFactory:
+    def build(self, host, user, password, verbose, quiet, cli):
+        self.quiet = quiet
+
+        self.lock = APCLock(quiet)
+        self.lock.lock()
 
         self.info('Connecting to APC @ %s' % host)
         if cli == '':
@@ -74,21 +106,9 @@ class APCFactory:
 
         apc.child = child
         apc.version = version
-        apc.apc_lock = self.apc_lock
+        apc.lock = self.lock
 
         return apc
-
-    def _lock(self):
-        self.info('Acquiring lock %s' % (LOCK_PATH))
-
-        self.apc_lock = FilesystemLock(LOCK_PATH)
-
-        count = 0
-        while not self.apc_lock.lock():
-            time.sleep(1)
-            count += 1
-            if count >= LOCK_TIMEOUT:
-                raise SystemError('Cannot acquire %s\n' % (LOCK_PATH))
 
     def info(self, msg):
         if not self.quiet:
@@ -116,16 +136,22 @@ class AbstractAPC:
             try:
                 outlet = int(outlet)
                 return (outlet, 'Outlet #%d' % outlet)
-
             except:
                 raise SystemExit('Bad outlet: [%s]' % outlet)
 
-    def _escape_to_main(self):
-        for i in range(6):
+    def _escape_to_main(self, depth=6):
+        for i in range(depth):
             self.child.send(APC_ESCAPE)
 
-    def reboot_immediate(self, outlet):
+    def set_reboot_duration(self, outlet, duration):
+        pass
+
+    def reboot_immediate(self, outlet, duration):
         (outlet, outlet_name) = self.get_outlet(outlet)
+
+        self.set_reboot_duration(outlet, duration)
+
+        self._escape_to_main()
 
         self.control_outlet(outlet)
 
@@ -144,11 +170,11 @@ class AbstractAPC:
     def reboot_delayed(self, outlet, delay):
         raise NotImplementedError()
 
-    def reboot(self, outlet, delay):
+    def reboot(self, outlet, delay, duration):
         if delay == 0:
-            self.reboot_immediate(outlet)
+            self.reboot_immediate(outlet, duration)
         else:
-            self.reboot_delayed(outlet, delay)
+            self.reboot_delayed(outlet, delay, duration)
 
     def on_off_immediate(self, outlet, on):
         (outlet, outlet_name) = self.get_outlet(outlet)
@@ -190,9 +216,6 @@ class AbstractAPC:
     def debug(self):
         self.child.interact()
 
-    def _unlock(self):
-        self.apc_lock.unlock()
-
     def disconnect(self):
         # self._escape_to_main()
 
@@ -205,12 +228,15 @@ class AbstractAPC:
             print('[%s]' % ''.join(self.child.readlines()))
 
         self.child.close()
-        self._unlock()
+        self.lock.unlock()
 
     def control_outlet(self, outlet):
         raise NotImplementedError()
 
     def get_command_result(self):
+        raise NotImplementedError()
+
+    def status(self):
         raise NotImplementedError()
 
 
@@ -257,22 +283,26 @@ class APC3(AbstractAPC):
     def get_command_result(self):
         self.child.expect('Command successfully issued')
 
-    def on_off_delayed(self, outlet, on, delay):
-        (outlet, outlet_name) = self.get_outlet(outlet)
-
+    def set_power_delay(self, outlet, on, delay):
         self.configure_outlet(outlet)
         self.child.expect("Configure Outlet")
-
         if on:
+            str_cmd = "On"
             self.sendnl('2')  # Power On Delay(sec)
         else:
+            str_cmd = "Off"
             self.sendnl('3')  # Power Off Delay(sec)
         if delay == -1 or delay >= 0 and delay <= 7200:
             self.sendnl(str(delay))
         else:
-            raise NotImplementedError("Delay Range: -1 to 7200 sec, where -1=Never")
+            raise SystemExit("Power %s Delay Range: -1 to 7200 sec, where -1=Never" % str_cmd)
         self.sendnl('5')  # Accept Changes
         self.child.before
+
+    def on_off_delayed(self, outlet, on, delay):
+        (outlet, outlet_name) = self.get_outlet(outlet)
+
+        self.set_power_delay(outlet, on, delay)
 
         self._escape_to_main()
 
@@ -292,9 +322,54 @@ class APC3(AbstractAPC):
 
         self.get_command_result()
 
-        self.notify(outlet_name, str_cmd)
+        self.notify(outlet_name, "Delayed %s (%d s)" % (str_cmd, delay))
 
         self._escape_to_main()
 
-    def reboot_delayed(self, outlet, delay):
-        raise NotImplementedError("ToDo: delay!=duration")
+    def status(self):
+        self.sendnl('1')
+        self.sendnl('2')
+        self.sendnl('1')
+        self.child.expect("-+ Outlet Control/Configuration -+")
+        self.child.expect("<ESC>")
+        s = self.child.before
+        s = s.decode("utf-8")  # b'' -> string
+        s = s.strip()
+        rows = s.split("\n")
+        lst_outlets = []
+        for row in rows[:-1]:
+            row = row.strip()[3:]
+            ol = Outlet.parse(row)
+            lst_outlets.append(ol)
+        ol_collection = Outlets(lst_outlets)
+        return ol_collection
+
+    def set_reboot_duration(self, outlet, duration):
+        self.configure_outlet(outlet)
+        self.sendnl('4')  # Reboot Duration
+        if duration < 5 or duration > 60:
+            raise SystemExit("Reboot Duration Range: 5 to 60 sec")
+        self.sendnl(str(duration))
+        self.sendnl('5')  # Accept Changes
+
+    def reboot_delayed(self, outlet, delay, duration):
+        (outlet, outlet_name) = self.get_outlet(outlet)
+        str_cmd = 'reboot'
+        self.set_reboot_duration(outlet, duration)
+        self._escape_to_main()
+        self.set_power_delay(outlet, False, delay)  # power off delay
+        self._escape_to_main()
+        self.set_power_delay(outlet, True, delay)  # power on delay
+        self._escape_to_main()
+        self.control_outlet(outlet)
+
+        self.sendnl(self.APC_DELAYED_REBOOT)
+        self.child.expect('Delayed Reboot')
+        self.sendnl(APC_YES)
+        self.sendnl('')
+
+        self.get_command_result()
+
+        self.notify(outlet_name, "Delayed %s (delay=%d duration=%d)" % (str_cmd, delay, duration))
+
+        self._escape_to_main()
