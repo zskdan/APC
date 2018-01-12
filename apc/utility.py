@@ -101,6 +101,8 @@ class APCFactory:
 
         if version[0] == '3':
             apc = APC3(host, verbose, quiet)
+        else if version[0] == '2' and version[1] == '5' and version [2] == '4':
+            apc = MyAPC(host, verbose, quiet)
         else:
             apc = APC2(host, verbose, quiet)
 
@@ -373,3 +375,38 @@ class APC3(AbstractAPC):
         self.notify(outlet_name, "Delayed %s (delay=%d duration=%d)" % (str_cmd, delay, duration))
 
         self._escape_to_main()
+
+class MyAPC(AbstractAPC):
+    APC_IMMEDIATE_ON     = '1'
+    APC_IMMEDIATE_OFF    = '2'
+    APC_IMMEDIATE_REBOOT = '3'
+    APC_DELAYED_ON       = '4'
+    APC_DELAYED_OFF      = '5'
+    APC_DELAYED_REBOOT   = '6'
+
+    def control_outlet(self, outlet):
+        self.sendnl('1')
+        self.sendnl(str(outlet))
+        self.sendnl('1')
+        self.child.before
+
+    def get_command_result(self):
+        self.child.expect('Outlet State')
+
+    def status(self):
+        self.sendnl('1')
+        self.sendnl('9')
+        self.sendnl('2')
+        self.child.expect("Configuration of MasterSwitch")
+        self.child.expect("<ESC>")
+        s = self.child.before
+        s = s.decode("utf-8")  # b'' -> string
+        s = s.strip()
+        rows = s.split("\n")
+        lst_outlets = []
+        for row in rows[:-1]:
+            row = row.strip()[3:]
+            ol = Outlet.parse(row)
+            lst_outlets.append(ol)
+        ol_collection = Outlets(lst_outlets)
+        return ol_collection
